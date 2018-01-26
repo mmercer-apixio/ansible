@@ -1,34 +1,12 @@
 ---
-- debug: msg="START ios_interface cli/basic.yaml"
-
-- name: Run show version
-  ios_command:
-    commands: show version
-    authorize: yes
-  register: show_version_result
-
-- name: Set test interface to GigabitEthernet0/1 if we are on Cisco IOS
-  set_fact: test_interface=GigabitEthernet0/1
-  when: "'Cisco IOS' in show_version_result.stdout[0]"
-
-- name: Set test interface 2 to GigabitEthernet0/2 if we are on Cisco IOS
-  set_fact: test_interface2=GigabitEthernet0/2
-  when: "'Cisco IOS' in show_version_result.stdout[0]"
-
-- name: Set test interface to GigabitEthernet2 if we are on Cisco IOS-XE
-  set_fact: test_interface=GigabitEthernet2
-  when: "'Cisco IOS-XE' in show_version_result.stdout[0]"
-
-- name: Set test interface 2 to GigabitEthernet3 if we are on Cisco IOS-XE
-  set_fact: test_interface2=GigabitEthernet3
-  when: "'Cisco IOS-XE' in show_version_result.stdout[0]"
+- debug: msg="START ios_interface cli/basic.yaml on connection={{ ansible_connection }}"
 
 - name: Configure interface (setup)
   ios_interface:
     name: "{{ test_interface }}"
     description: test-interface-1
     speed: 1000
-    mtu: 1500
+    mtu: 1800
     state: present
     authorize: yes
   register: result
@@ -63,7 +41,7 @@
   ios_interface:
     name: "{{ test_interface }}"
     description: test-interface
-    mtu: 1600
+    mtu: 2000
     state: present
     authorize: yes
   register: result
@@ -73,13 +51,13 @@
       - 'result.changed == true'
       - '"interface {{ test_interface }}" in result.commands'
       - '"description test-interface" in result.commands'
-      - '"mtu 1600" in result.commands'
+      - '"mtu 2000" in result.commands'
 
 - name: Change interface parameters
   ios_interface:
     name: "{{ test_interface }}"
     description: test-interface-1
-    mtu: 1500
+    mtu: 1800
     state: present
     authorize: yes
   register: result
@@ -89,7 +67,7 @@
       - 'result.changed == true'
       - '"interface {{ test_interface }}" in result.commands'
       - '"description test-interface-1" in result.commands'
-      - '"mtu 1500" in result.commands'
+      - '"mtu 1800" in result.commands'
 
 - name: Disable interface
   ios_interface:
@@ -122,7 +100,7 @@
     name: "{{ test_interface2 }}"
     description: test-interface-initial
     speed: 1000
-    mtu: 1500
+    mtu: 1800
     state: present
     authorize: yes
   register: result
@@ -130,8 +108,8 @@
 - name: Add interface aggregate
   ios_interface:
     aggregate:
-    - { name: "{{ test_interface }}", mtu: 1500, description: test-interface-1 }
-    - { name: "{{ test_interface2 }}", mtu: 1600, description: test-interface-2 }
+    - { name: "{{ test_interface }}", mtu: 2000, description: test-interface-1 }
+    - { name: "{{ test_interface2 }}", mtu: 2000, description: test-interface-2 }
     speed: 1000
     state: present
     authorize: yes
@@ -141,16 +119,16 @@
     that:
       - 'result.changed == true'
       - '"interface {{ test_interface }}" in result.commands'
-      - '"mtu 1500" in result.commands'
+      - '"mtu 2000" in result.commands'
       - '"interface {{ test_interface2 }}" in result.commands'
       - '"description test-interface-2" in result.commands'
-      - '"mtu 1600" in result.commands'
+      - '"mtu 2000" in result.commands'
 
 - name: Add interface aggregate (idempotent)
   ios_interface:
     aggregate:
-    - { name: "{{ test_interface }}", mtu: 1500, description: test-interface-1 }
-    - { name: "{{ test_interface2 }}", mtu: 1600, description: test-interface-2 }
+    - { name: "{{ test_interface }}", mtu: 2000, description: test-interface-1 }
+    - { name: "{{ test_interface2 }}", mtu: 2000, description: test-interface-2 }
     speed: 1000
     state: present
     authorize: yes
@@ -163,8 +141,8 @@
 - name: Disable interface aggregate
   ios_interface:
     aggregate:
-    - "name: {{ test_interface }}"
-    - "name: {{ test_interface2 }}"
+    - { name: "{{ test_interface }}" }
+    - { name: "{{ test_interface2 }}" }
     enabled: False
     state: present
     authorize: yes
@@ -181,8 +159,8 @@
 - name: Enable interface aggregate
   ios_interface:
     aggregate:
-    - "name: {{ test_interface }}"
-    - "name: {{ test_interface2 }}"
+    - { name: "{{ test_interface }}" }
+    - { name: "{{ test_interface2 }}" }
     enabled: True
     state: present
     authorize: yes
@@ -247,4 +225,4 @@
     that:
       - 'result.changed == false'
 
-- debug: msg="END ios_interface cli/basic.yaml"
+- debug: msg="END ios_interface cli/basic.yaml on connection={{ ansible_connection }}"

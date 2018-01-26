@@ -101,7 +101,10 @@ options:
   overwrite:
     description:
       - Force overwrite either locally on the filesystem or remotely with the object/key. Used with PUT and GET operations.
-        Boolean or one of [always, never, different], true is equal to 'always' and false is equal to 'never', new in 2.0
+        Boolean or one of [always, never, different], true is equal to 'always' and false is equal to 'never', new in 2.0.
+        When this is set to 'different', the md5 sum of the local file is compared with the 'ETag' of the object/key in S3.
+        The ETag may or may not be an MD5 digest of the object data. See the ETag response header here
+        U(http://docs.aws.amazon.com/AmazonS3/latest/API/RESTCommonResponseHeaders.html)
     default: 'always'
     aliases: ['force']
     version_added: "1.2"
@@ -140,7 +143,9 @@ requirements: [ "boto3", "botocore" ]
 author:
     - "Lester Wade (@lwade)"
     - "Sloane Hertel (@s-hertel)"
-extends_documentation_fragment: aws
+extends_documentation_fragment:
+    - aws
+    - ec2
 '''
 
 EXAMPLES = '''
@@ -268,8 +273,9 @@ s3_keys:
   - prefix1/key2
 '''
 
-import os
+import hashlib
 import mimetypes
+import os
 import traceback
 from ansible.module_utils.six.moves.urllib.parse import urlparse
 from ssl import SSLError
@@ -303,7 +309,34 @@ def key_check(module, s3, bucket, obj, version=None, validate=True):
     return exists
 
 
-def keysum(module, s3, bucket, obj, version=None):
+def keysum_compare(module, local_file, s3, bucket, obj, version=None):
+    s3_keysum = keysum(s3, bucket, obj, version=version)
+    if '-' in s3_keysum:  # Check for multipart, ETag is not a proper MD5 sum
+        parts = int(s3_keysum.split('-')[1])
+        md5s = []
+
+        with open(local_file, 'rb') as f:
+            for part_num in range(1, parts + 1):
+                # Get the part size for every part of the multipart uploaded object
+                if version:
+                    key_head = s3.head_object(Bucket=bucket, Key=obj, VersionId=version, PartNumber=part_num)
+                else:
+                    key_head = s3.head_object(Bucket=bucket, Key=obj, PartNumber=part_num)
+                part_size = int(key_head['ContentLength'])
+                data = f.read(part_size)
+                hash = hashlib.md5(data)
+                md5s.append(hash)
+
+        digests = b''.join(m.digest() for m in md5s)
+        digests_md5 = hashlib.md5(digests)
+        local_keysum = '{0}-{1}'.format(digests_md5.hexdigest(), len(md5s))
+    else:  # Compute the MD5 sum normally
+        local_keysum = module.md5(local_file)
+
+    return s3_keysum == local_keysum
+
+
+def keysum(s3, bucket, obj, version=None):
     if version:
         key_check = s3.head_object(Bucket=bucket, Key=obj, VersionId=version)
     else:
@@ -311,8 +344,6 @@ def keysum(module, s3, bucket, obj, version=None):
     if not key_check:
         return None
     md5_remote = key_check['ETag'][1:-1]
-    if '-' in md5_remote:  # Check for multipart, etag is not md5
-        return None
     return md5_remote
 
 
@@ -404,11 +435,15 @@ def delete_key(module, s3, bucket, obj):
         module.fail_json(msg="Failed while trying to delete %s." % obj, exception=traceback.format_exc(), **camel_dict_to_snake_dict(e.response))
 
 
-def create_dirkey(module, s3, bucket, obj):
+def create_dirkey(module, s3, bucket, obj, encrypt):
     if module.check_mode:
         module.exit_json(msg="PUT operation skipped - running in check mode", changed=True)
     try:
-        s3.put_object(Bucket=bucket, Key=obj, Body=b'')
+        params = {'Bucket': bucket, 'Key': obj, 'Body': b''}
+        if encrypt:
+            params['ServerSideEncryption'] = 'AES256'
+
+        s3.put_object(**params)
         for acl in module.params.get('permission'):
             s3.put_object_acl(ACL=acl, Bucket=bucket, Key=obj)
         module.exit_json(msg="Virtual directory %s created in bucket %s" % (obj, bucket), changed=True)
@@ -552,15 +587,19 @@ def get_s3_connection(module, aws_connect_kwargs, location, rgw, s3_url):
         rgw = urlparse(s3_url)
         params = dict(module=module, conn_type='client', resource='s3', use_ssl=rgw.scheme == 'https', region=location, endpoint=s3_url, **aws_connect_kwargs)
     elif is_fakes3(s3_url):
-        for kw in ['is_secure', 'host', 'port'] and list(aws_connect_kwargs.keys()):
-            del aws_connect_kwargs[kw]
         fakes3 = urlparse(s3_url)
+        port = fakes3.port
         if fakes3.scheme == 'fakes3s':
             protocol = "https"
+            if port is None:
+                port = 443
         else:
             protocol = "http"
-        params = dict(service_name='s3', endpoint_url="%s://%s:%s" % (protocol, fakes3.hostname, to_text(fakes3.port)),
-                      use_ssl=fakes3.scheme == 'fakes3s', region_name=None, **aws_connect_kwargs)
+            if port is None:
+                port = 80
+        params = dict(module=module, conn_type='client', resource='s3', region=location,
+                      endpoint="%s://%s:%s" % (protocol, fakes3.hostname, to_text(port)),
+                      use_ssl=fakes3.scheme == 'fakes3s', **aws_connect_kwargs)
     elif is_walrus(s3_url):
         walrus = urlparse(s3_url).hostname
         params = dict(module=module, conn_type='client', resource='s3', region=location, endpoint=walrus, **aws_connect_kwargs)
@@ -668,10 +707,7 @@ def main():
     if s3_url:
         for key in ['validate_certs', 'security_token', 'profile_name']:
             aws_connect_kwargs.pop(key, None)
-    try:
-        s3 = get_s3_connection(module, aws_connect_kwargs, location, rgw, s3_url)
-    except botocore.exceptions.ProfileNotFound as e:
-        module.fail_json(msg=to_native(e))
+    s3 = get_s3_connection(module, aws_connect_kwargs, location, rgw, s3_url)
 
     validate = not ignore_nonexistent_bucket
 
@@ -698,11 +734,11 @@ def main():
             else:
                 module.fail_json(msg="Key %s does not exist." % obj)
 
-        # If the destination path doesn't exist or overwrite is True, no need to do the md5um etag check, so just download.
+        # If the destination path doesn't exist or overwrite is True, no need to do the md5sum ETag check, so just download.
         # Compare the remote MD5 sum of the object with the local dest md5sum, if it already exists.
         if path_check(dest):
             # Determine if the remote and local object are identical
-            if keysum(module, s3, bucket, obj, version=version) == module.md5(dest):
+            if keysum_compare(module, dest, s3, bucket, obj, version=version):
                 sum_matches = True
                 if overwrite == 'always':
                     download_s3file(module, s3, bucket, obj, dest, retries, version=version)
@@ -732,10 +768,10 @@ def main():
         if bucketrtn:
             keyrtn = key_check(module, s3, bucket, obj, version=version, validate=validate)
 
-        # Lets check key state. Does it exist and if it does, compute the etag md5sum.
+        # Lets check key state. Does it exist and if it does, compute the ETag md5sum.
         if bucketrtn and keyrtn:
             # Compare the local and remote object
-            if module.md5(src) == keysum(module, s3, bucket, obj):
+            if keysum_compare(module, src, s3, bucket, obj):
                 sum_matches = True
                 if overwrite == 'always':
                     # only use valid object acls for the upload_s3file function
@@ -822,14 +858,14 @@ def main():
                 else:
                     # setting valid object acls for the create_dirkey function
                     module.params['permission'] = object_acl
-                    create_dirkey(module, s3, bucket, dirobj)
+                    create_dirkey(module, s3, bucket, dirobj, encrypt)
             else:
                 # only use valid bucket acls for the create_bucket function
                 module.params['permission'] = bucket_acl
                 created = create_bucket(module, s3, bucket, location)
                 # only use valid object acls for the create_dirkey function
                 module.params['permission'] = object_acl
-                create_dirkey(module, s3, bucket, dirobj)
+                create_dirkey(module, s3, bucket, dirobj, encrypt)
 
     # Support for grabbing the time-expired URL for an object in S3/Walrus.
     if mode == 'geturl':

@@ -1,5 +1,5 @@
 ---
-- debug: msg="START cli/set_name_servers.yaml"
+- debug: msg="START cli/set_name_servers.yaml on connection={{ ansible_connection }}"
 
 - name: setup
   ios_config:
@@ -84,8 +84,8 @@
 - name: teardown
   ios_config:
     lines:
-      - no ip domain lookup source-interface
+      - no ip name-server
     match: none
     authorize: yes
 
-- debug: msg="END cli/set_name_servers.yaml"
+- debug: msg="END cli/set_name_servers.yaml on connection={{ ansible_connection }}"

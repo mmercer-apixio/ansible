@@ -25,10 +25,8 @@ from lib.executor import (
     command_network_integration,
     command_windows_integration,
     command_units,
-    command_compile,
     command_shell,
     SUPPORTED_PYTHON_VERSIONS,
-    COMPILE_PYTHON_VERSIONS,
     ApplicationWarning,
     Delegate,
     generate_pip_install,
@@ -42,7 +40,6 @@ from lib.config import (
     NetworkIntegrationConfig,
     SanityConfig,
     UnitsConfig,
-    CompileConfig,
     ShellConfig,
 )
 
@@ -58,7 +55,6 @@ from lib.target import (
     walk_network_integration_targets,
     walk_windows_integration_targets,
     walk_units_targets,
-    walk_compile_targets,
     walk_sanity_targets,
 )
 
@@ -302,22 +298,6 @@ def parse_args():
 
     add_extra_docker_options(units, integration=False)
 
-    compiler = subparsers.add_parser('compile',
-                                     parents=[test],
-                                     help='compile tests')
-
-    compiler.set_defaults(func=command_compile,
-                          targets=walk_compile_targets,
-                          config=CompileConfig)
-
-    compiler.add_argument('--python',
-                          metavar='VERSION',
-                          choices=COMPILE_PYTHON_VERSIONS + ('default',),
-                          help='python version: %s' % ', '.join(COMPILE_PYTHON_VERSIONS))
-
-    add_lint(compiler)
-    add_extra_docker_options(compiler, integration=False)
-
     sanity = subparsers.add_parser('sanity',
                                    parents=[test],
                                    help='sanity tests')
@@ -514,6 +494,7 @@ def add_environments(parser, tox_version=False, tox_only=False):
             docker=None,
             remote=None,
             remote_stage=None,
+            remote_provider=None,
             remote_aws_region=None,
             remote_terminate=None,
         )
@@ -524,7 +505,7 @@ def add_environments(parser, tox_version=False, tox_only=False):
                               metavar='IMAGE',
                               nargs='?',
                               default=None,
-                              const='ubuntu1604',
+                              const='default',
                               help='run from a docker container').completer = complete_docker
 
     environments.add_argument('--remote',
@@ -539,6 +520,12 @@ def add_environments(parser, tox_version=False, tox_only=False):
                         help='remote stage to use: %(choices)s',
                         choices=['prod', 'dev'],
                         default='prod')
+
+    remote.add_argument('--remote-provider',
+                        metavar='PROVIDER',
+                        help='remote provider to use: %(choices)s',
+                        choices=['default', 'aws', 'azure', 'parallels'],
+                        default='default')
 
     remote.add_argument('--remote-aws-region',
                         metavar='REGION',

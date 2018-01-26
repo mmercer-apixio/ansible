@@ -48,6 +48,7 @@ from lib.util import (
     find_pip,
     find_executable,
     raw_command,
+    get_coverage_path,
 )
 
 from lib.ansible_util import (
@@ -62,7 +63,6 @@ from lib.target import (
     walk_network_integration_targets,
     walk_windows_integration_targets,
     walk_units_targets,
-    walk_compile_targets,
 )
 
 from lib.changes import (
@@ -81,7 +81,6 @@ from lib.classification import (
 from lib.config import (
     TestConfig,
     EnvironmentConfig,
-    CompileConfig,
     IntegrationConfig,
     NetworkIntegrationConfig,
     PosixIntegrationConfig,
@@ -90,21 +89,13 @@ from lib.config import (
     WindowsIntegrationConfig,
 )
 
-from lib.test import (
-    TestMessage,
-    TestSuccess,
-    TestFailure,
-    TestSkipped,
-)
-
 SUPPORTED_PYTHON_VERSIONS = (
     '2.6',
     '2.7',
     '3.5',
     '3.6',
+    '3.7',
 )
-
-COMPILE_PYTHON_VERSIONS = SUPPORTED_PYTHON_VERSIONS
 
 
 def check_startup():
@@ -317,10 +308,12 @@ def command_network_integration(args):
 
     all_targets = tuple(walk_network_integration_targets(include_hidden=True))
     internal_targets = command_integration_filter(args, all_targets, init_callback=network_init)
+    instances = []  # type: list [lib.thread.WrappedThread]
 
     if args.platform:
+        get_coverage_path(args)  # initialize before starting threads
+
         configs = dict((config['platform_version'], config) for config in args.metadata.instance_config)
-        instances = []  # type: list [lib.thread.WrappedThread]
 
         for platform_version in args.platform:
             platform, version = platform_version.split('/', 1)
@@ -346,7 +339,15 @@ def command_network_integration(args):
             with open(filename, 'w') as inventory_fd:
                 inventory_fd.write(inventory)
 
-    command_integration_filtered(args, internal_targets, all_targets)
+    success = False
+
+    try:
+        command_integration_filtered(args, internal_targets, all_targets)
+        success = True
+    finally:
+        if args.remote_terminate == 'always' or (args.remote_terminate == 'success' and success):
+            for instance in instances:
+                instance.result.stop()
 
 
 def network_init(args, internal_targets):
@@ -371,7 +372,7 @@ def network_init(args, internal_targets):
         platform, version = platform_version.split('/', 1)
         platform_target = 'network/%s/' % platform
 
-        if platform_target not in platform_targets and 'network/basics/' not in platform_targets:
+        if platform_target not in platform_targets:
             display.warning('Skipping "%s" because selected tests do not target the "%s" platform.' % (
                 platform_version, platform))
             continue
@@ -394,7 +395,7 @@ def network_start(args, platform, version):
     :type version: str
     :rtype: AnsibleCoreCI
     """
-    core_ci = AnsibleCoreCI(args, platform, version, stage=args.remote_stage)
+    core_ci = AnsibleCoreCI(args, platform, version, stage=args.remote_stage, provider=args.remote_provider)
     core_ci.start()
 
     return core_ci.save()
@@ -408,7 +409,7 @@ def network_run(args, platform, version, config):
     :type config: dict[str, str]
     :rtype: AnsibleCoreCI
     """
-    core_ci = AnsibleCoreCI(args, platform, version, stage=args.remote_stage, load=False)
+    core_ci = AnsibleCoreCI(args, platform, version, stage=args.remote_stage, provider=args.remote_provider, load=False)
     core_ci.load(config)
     core_ci.wait()
 
@@ -424,12 +425,13 @@ def network_inventory(remotes):
     :rtype: str
     """
     groups = dict([(remote.platform, []) for remote in remotes])
+    net = []
 
     for remote in remotes:
         options = dict(
             ansible_host=remote.connection.hostname,
             ansible_user=remote.connection.username,
-            ansible_ssh_private_key_file=remote.ssh_key.key,
+            ansible_ssh_private_key_file=os.path.abspath(remote.ssh_key.key),
             ansible_network_os=remote.platform,
             ansible_connection='local'
         )
@@ -440,6 +442,10 @@ def network_inventory(remotes):
                 ' '.join('%s="%s"' % (k, options[k]) for k in sorted(options)),
             )
         )
+
+        net.append(remote.platform)
+
+    groups['net:children'] = net
 
     template = ''
 
@@ -467,10 +473,12 @@ def command_windows_integration(args):
 
     all_targets = tuple(walk_windows_integration_targets(include_hidden=True))
     internal_targets = command_integration_filter(args, all_targets, init_callback=windows_init)
+    instances = []  # type: list [lib.thread.WrappedThread]
 
     if args.windows:
+        get_coverage_path(args)  # initialize before starting threads
+
         configs = dict((config['platform_version'], config) for config in args.metadata.instance_config)
-        instances = []  # type: list [lib.thread.WrappedThread]
 
         for version in args.windows:
             config = configs['windows/%s' % version]
@@ -492,7 +500,15 @@ def command_windows_integration(args):
             with open(filename, 'w') as inventory_fd:
                 inventory_fd.write(inventory)
 
-    command_integration_filtered(args, internal_targets, all_targets)
+    success = False
+
+    try:
+        command_integration_filtered(args, internal_targets, all_targets)
+        success = True
+    finally:
+        if args.remote_terminate == 'always' or (args.remote_terminate == 'success' and success):
+            for instance in instances:
+                instance.result.stop()
 
 
 def windows_init(args, internal_targets):  # pylint: disable=locally-disabled, unused-argument
@@ -526,7 +542,7 @@ def windows_start(args, version):
     :type version: str
     :rtype: AnsibleCoreCI
     """
-    core_ci = AnsibleCoreCI(args, 'windows', version, stage=args.remote_stage)
+    core_ci = AnsibleCoreCI(args, 'windows', version, stage=args.remote_stage, provider=args.remote_provider)
     core_ci.start()
 
     return core_ci.save()
@@ -539,7 +555,7 @@ def windows_run(args, version, config):
     :type config: dict[str, str]
     :rtype: AnsibleCoreCI
     """
-    core_ci = AnsibleCoreCI(args, 'windows', version, stage=args.remote_stage, load=False)
+    core_ci = AnsibleCoreCI(args, 'windows', version, stage=args.remote_stage, provider=args.remote_provider, load=False)
     core_ci.load(config)
     core_ci.wait()
 
@@ -750,7 +766,12 @@ def command_integration_filtered(args, targets, all_targets):
                     display.warning('Retrying test target "%s" with maximum verbosity.' % target.name)
                     display.verbosity = args.verbosity = 6
 
+            start_time = time.time()
             original_environment.validate(target.name, throw=True)
+            end_time = time.time()
+
+            results[target.name]['validation_seconds'] = int(end_time - start_time)
+
             passed.append(target)
         except Exception as ex:
             failed.append(target)
@@ -990,114 +1011,6 @@ def command_units(args):
             # pytest exits with status code 5 when all tests are skipped, which isn't an error for our use case
             if ex.status != 5:
                 raise
-
-
-def command_compile(args):
-    """
-    :type args: CompileConfig
-    """
-    changes = get_changes_filter(args)
-    require = (args.require or []) + changes
-    include, exclude = walk_external_targets(walk_compile_targets(), args.include, args.exclude, require)
-
-    if not include:
-        raise AllTargetsSkipped()
-
-    if args.delegate:
-        raise Delegate(require=changes)
-
-    install_command_requirements(args)
-
-    total = 0
-    failed = []
-
-    for version in COMPILE_PYTHON_VERSIONS:
-        # run all versions unless version given, in which case run only that version
-        if args.python and version != args.python_version:
-            continue
-
-        display.info('Compile with Python %s' % version)
-
-        result = compile_version(args, version, include, exclude)
-        result.write(args)
-
-        total += 1
-
-        if isinstance(result, TestFailure):
-            failed.append('compile --python %s' % version)
-
-    if failed:
-        message = 'The %d compile test(s) listed below (out of %d) failed. See error output above for details.\n%s' % (
-            len(failed), total, '\n'.join(failed))
-
-        if args.failure_ok:
-            display.error(message)
-        else:
-            raise ApplicationError(message)
-
-
-def compile_version(args, python_version, include, exclude):
-    """
-    :type args: CompileConfig
-    :type python_version: str
-    :type include: tuple[CompletionTarget]
-    :type exclude: tuple[CompletionTarget]
-    :rtype: TestResult
-    """
-    command = 'compile'
-    test = ''
-
-    # optional list of regex patterns to exclude from tests
-    skip_file = 'test/compile/python%s-skip.txt' % python_version
-
-    if os.path.exists(skip_file):
-        with open(skip_file, 'r') as skip_fd:
-            skip_paths = skip_fd.read().splitlines()
-    else:
-        skip_paths = []
-
-    # augment file exclusions
-    skip_paths += [e.path for e in exclude]
-
-    skip_paths = sorted(skip_paths)
-
-    python = 'python%s' % python_version
-    cmd = [python, 'test/compile/compile.py']
-
-    if skip_paths:
-        cmd += ['-x', '|'.join(skip_paths)]
-
-    cmd += [target.path if target.path == '.' else './%s' % target.path for target in include]
-
-    try:
-        stdout, stderr = run_command(args, cmd, capture=True)
-        status = 0
-    except SubprocessError as ex:
-        stdout = ex.stdout
-        stderr = ex.stderr
-        status = ex.status
-
-    if stderr:
-        raise SubprocessError(cmd=cmd, status=status, stderr=stderr, stdout=stdout)
-
-    if args.explain:
-        return TestSkipped(command, test, python_version=python_version)
-
-    pattern = r'^(?P<path>[^:]*):(?P<line>[0-9]+):(?P<column>[0-9]+): (?P<message>.*)$'
-
-    results = [re.search(pattern, line).groupdict() for line in stdout.splitlines()]
-
-    results = [TestMessage(
-        message=r['message'],
-        path=r['path'].replace('./', ''),
-        line=int(r['line']),
-        column=int(r['column']),
-    ) for r in results]
-
-    if results:
-        return TestFailure(command, test, messages=results, python_version=python_version)
-
-    return TestSuccess(command, test, python_version=python_version)
 
 
 def get_changes_filter(args):
